@@ -1,0 +1,159 @@
+namespace ulid;
+
+import "std";
+import "math";
+import "os";
+import "errors";
+
+export enum Error {
+    InvalidTime,
+    InvalidEncodedString,
+    CannotIncrementString,
+    MalformedULID,
+}
+
+| Crockford's Base32
+const ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const ENCODING_LEN = ENCODING.len();
+const MAX_TIME = math.pow(x: 2.0, y: 48.0) - 1.0;
+const TIME_LEN = 10;
+const RANDOM_LEN = 16;
+
+fun randomChar() > str {
+    var rand = math.floor((std.toFloat(std.random(min: 0, max: 100)) / 100.0) * std.toFloat(ENCODING_LEN));
+    if (rand == ENCODING_LEN) {
+        rand = ENCODING_LEN - 1;
+    }
+
+    return ENCODING[rand];
+}
+
+fun replaceCharAt(str string, int index, str replace) > str {
+    if (index > string.len() - 1) {
+        return string;
+    }
+
+    return string.sub(0, len: index) + replace + string.sub(index + 1);
+}
+
+fun incrementBase32(str string) > str !> Error {
+    str currentString = string;
+    str? done = null;
+    str char = "";
+    int? charIndex = null;
+    const maxCharIndex = ENCODING_LEN - 1;
+    for (int index = currentString.len(); done == null and index >= 0; index = index - 1) {
+        char = currentString[index];
+        charIndex = ENCODING.indexOf(char);
+
+        if (charIndex == null) {
+            throw Error.InvalidEncodedString;
+        }
+
+        if (charIndex == maxCharIndex) {
+            currentString = replaceCharAt(currentString, index, replace: ENCODING[0]);
+            continue;
+        }
+
+        done = replaceCharAt(currentString, index, replace: ENCODING[charIndex + 1]);
+    }
+
+    if (done -> result) {
+        return result;
+    }
+
+    throw Error.CannotIncrementString;
+}
+
+fun encodeRandom(int len) > str {
+    var res = "";
+    foreach (int _ in len..0) {
+        res = randomChar() + res;
+    }
+
+    return res;
+}
+
+fun encodeTime(float? now, int len) > str !> Error {
+    var time = now ?? os.time();
+
+    if (time < 0 or time > MAX_TIME) {
+        throw Error.InvalidTime;
+    }
+
+    var encoded = "";
+    foreach (int _ in len..0) {
+        const mod = time % std.toFloat(ENCODING_LEN);
+        encoded = ENCODING[std.toInt(mod)] + encoded;
+        time = (time - mod) / std.toFloat(ENCODING_LEN);
+    }
+
+    return encoded;
+}
+
+export fun generate() > Function(float? seedTime) > str !> Error {
+    return fun (float? seedTime) > str !> Error
+        -> encodeTime(seedTime, len: TIME_LEN) + encodeRandom(RANDOM_LEN);
+}
+
+export fun generateMonotonic() > Function(float? seedTime) > str !> Error {
+    var lastTime = 0.0;
+    var lastRandom = "";
+    return fun (float? seedTime) > str !> Error {
+        const time = seedTime ?? os.time();
+        
+        if (time <= lastTime) {
+            const incrementRandom = incrementBase32(lastRandom);
+            lastRandom = incrementRandom;
+            
+            return encodeTime(lastTime, len: TIME_LEN) + incrementRandom;
+        }
+
+        lastTime = time;
+
+        const newRandom = encodeRandom(RANDOM_LEN);
+        lastRandom = newRandom;
+
+        return encodeTime(time, len: TIME_LEN) + newRandom;
+    };
+}
+
+export fun decodeTime(str id) > float !> Error {
+    if (id.len() != TIME_LEN + RANDOM_LEN) {
+        throw Error.MalformedULID;
+    }
+
+    var time = id
+        .sub(0, len: TIME_LEN)
+        .split("")
+        .reverse()
+        .reduce::<float>(
+            fun (int index, str char, float carry) > float !> Error, errors.OverflowError, errors.UnderflowError {
+                const encodingIndex = ENCODING.indexOf(char);
+                if (encodingIndex -> encodingIdx) {
+                    return carry + std.toFloat(encodingIdx) * math.pow(x: std.toFloat(ENCODING_LEN), y: std.toFloat(index));
+                }
+
+                throw Error.InvalidEncodedString;
+            },
+            initial: 0.0,
+        );
+
+    if (time > MAX_TIME) {
+        throw Error.MalformedULID;
+    }
+
+    return time;
+}
+
+test "ULID" {
+    const now = os.time();
+    const id = generate()(now);
+    std.print("At {now} id is {id}");
+
+    const time = decodeTime(id);
+    std.print("Decoded time: {time}");
+
+    const monoid = generateMonotonic()();
+    std.print(monoid);
+}
